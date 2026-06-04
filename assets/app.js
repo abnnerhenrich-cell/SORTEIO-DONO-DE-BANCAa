@@ -1,35 +1,22 @@
 import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
 import {
   getFirestore, collection, doc, addDoc, setDoc, updateDoc, deleteDoc, getDoc,
-  onSnapshot, query, where, getDocs, serverTimestamp
+  onSnapshot, query, where, getDocs, serverTimestamp, runTransaction
 } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
 
 const cfg = window.SORTEIO_CONFIG || {tipo:'dezenas',label:'Dezenas',itemName:'dezena',total:100,digits:2};
 
-const firebaseConfigs = {
-  dezenas: {
-    apiKey: "AIzaSyCzap1Q0i-SFXYm-xggpBjA9Di0t1ik-2Q",
-    authDomain: "sorteio-dono-da-banca-cc390.firebaseapp.com",
-    databaseURL: "https://sorteio-dono-da-banca-cc390-default-rtdb.firebaseio.com",
-    projectId: "sorteio-dono-da-banca-cc390",
-    storageBucket: "sorteio-dono-da-banca-cc390.firebasestorage.app",
-    messagingSenderId: "706263547085",
-    appId: "1:706263547085:web:95cc2eba1f94d2db183d84",
-    measurementId: "G-P469JTGNHL"
-  },
-  centenas: {
-    apiKey: "AIzaSyCzap1Q0i-SFXYm-xggpBjA9Di0t1ik-2Q",
-    authDomain: "sorteio-dono-da-banca-cc390.firebaseapp.com",
-    databaseURL: "https://sorteio-dono-da-banca-cc390-default-rtdb.firebaseio.com",
-    projectId: "sorteio-dono-da-banca-cc390",
-    storageBucket: "sorteio-dono-da-banca-cc390.firebasestorage.app",
-    messagingSenderId: "706263547085",
-    appId: "1:706263547085:web:95cc2eba1f94d2db183d84",
-    measurementId: "G-P469JTGNHL"
-  }
+// Firebase novo da Kelly - projeto: sorteio-f5431
+// Este mesmo projeto salva dezenas e centenas em coleções separadas.
+const firebaseConfig = {
+  apiKey: "AIzaSyBsGIvJlD9F9fH74qJUzsZ3GN139hKnpcs",
+  authDomain: "sorteio-f5431.firebaseapp.com",
+  projectId: "sorteio-f5431",
+  storageBucket: "sorteio-f5431.firebasestorage.app",
+  messagingSenderId: "788509225413",
+  appId: "1:788509225413:web:8b5cb3683b4203d7955bac",
+  measurementId: "G-8NVZNYYHMJ"
 };
-
-const firebaseConfig = firebaseConfigs[cfg.tipo] || firebaseConfigs.dezenas;
 const app = initializeApp(firebaseConfig);
 const firestore = getFirestore(app);
 
@@ -45,6 +32,8 @@ let settings = {nome:'SorteClub',rodape:'Kelly Menezes',cadastroUrl:''};
 const $ = (id) => document.getElementById(id);
 const col = (nome) => collection(firestore, `${nome}_${cfg.tipo}`);
 const configDoc = () => doc(firestore, 'config', `site_${cfg.tipo}`);
+const reservaDoc = (sorteioId, numero) => doc(firestore, `reservas_${cfg.tipo}`, `${sorteioId}_${numero}`);
+const whatsDoc = (sorteioId, whatsLimpo) => doc(firestore, `whats_${cfg.tipo}`, `${sorteioId}_${whatsLimpo}`);
 
 function escapeHtml(v){
   return String(v ?? '').replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
@@ -271,32 +260,71 @@ async function salvarParticipacao(){
   if(whatsLimpo.length < 10 || whatsLimpo.length > 11) return alert('Digite um WhatsApp válido usando apenas números, com DDD.');
   if(selectedNumeros.length !== limite) return alert(`Escolha exatamente ${limite} ${cfg.itemName}${limite>1?'s':''}.`);
 
-  const snapWhats = await getDocs(query(col('participantes'), where('sorteioId','==',s.id), where('whatsLimpo','==',whatsLimpo)));
-  if(!snapWhats.empty) return alert('Este WhatsApp já participou deste sorteio.');
+  const numerosEscolhidos = [...selectedNumeros];
 
-  for(const numero of selectedNumeros){
-    const snapArray = await getDocs(query(col('participantes'), where('sorteioId','==',s.id), where('numeros','array-contains',numero)));
-    const snapOld = await getDocs(query(col('participantes'), where('sorteioId','==',s.id), where('numero','==',numero)));
-    if(!snapArray.empty || !snapOld.empty) return alert(`A ${cfg.itemName} ${numero} já foi escolhida.`);
+  try{
+    await runTransaction(firestore, async (transaction) => {
+      const whatsRef = whatsDoc(s.id, whatsLimpo);
+      const whatsSnap = await transaction.get(whatsRef);
+      if(whatsSnap.exists()){
+        throw new Error('WHATS_DUPLICADO');
+      }
+
+      const reservaRefs = numerosEscolhidos.map(numero => reservaDoc(s.id, numero));
+      for(let i = 0; i < reservaRefs.length; i++){
+        const reservaSnap = await transaction.get(reservaRefs[i]);
+        if(reservaSnap.exists()){
+          throw new Error(`NUMERO_OCUPADO:${numerosEscolhidos[i]}`);
+        }
+      }
+
+      const participanteRef = doc(col('participantes'));
+      const payload = {
+        tipo: cfg.tipo,
+        sorteioId: s.id,
+        sorteioTitulo: s.titulo,
+        nome,
+        whats,
+        whatsLimpo,
+        numeros: numerosEscolhidos,
+        numero: numerosEscolhidos.join(', '),
+        limiteNumeros: limite,
+        data: new Date().toISOString().slice(0,10),
+        criadoEm: serverTimestamp()
+      };
+
+      transaction.set(participanteRef, payload);
+      transaction.set(whatsRef, {
+        tipo: cfg.tipo,
+        sorteioId: s.id,
+        whatsLimpo,
+        participanteId: participanteRef.id,
+        criadoEm: serverTimestamp()
+      });
+
+      reservaRefs.forEach((ref, i) => {
+        transaction.set(ref, {
+          tipo: cfg.tipo,
+          sorteioId: s.id,
+          numero: numerosEscolhidos[i],
+          participanteId: participanteRef.id,
+          whatsLimpo,
+          criadoEm: serverTimestamp()
+        });
+      });
+    });
+
+    selectedNumeros = [];
+    closeModal('participarModal');
+    alert('Participação confirmada! Boa sorte.');
+  }catch(err){
+    if(err?.message === 'WHATS_DUPLICADO') return alert('Este WhatsApp já participou deste sorteio.');
+    if(String(err?.message || '').startsWith('NUMERO_OCUPADO:')){
+      const numero = String(err.message).split(':')[1];
+      return alert(`A ${cfg.itemName} ${numero} já foi escolhida. Atualize e escolha outra.`);
+    }
+    mostrarErroFirebase(err, 'salvar participação');
   }
-
-  await addDoc(col('participantes'), {
-    tipo: cfg.tipo,
-    sorteioId: s.id,
-    sorteioTitulo: s.titulo,
-    nome,
-    whats,
-    whatsLimpo,
-    numeros: [...selectedNumeros],
-    numero: selectedNumeros.join(', '),
-    limiteNumeros: limite,
-    data: new Date().toISOString().slice(0,10),
-    criadoEm: serverTimestamp()
-  });
-
-  selectedNumeros = [];
-  closeModal('participarModal');
-  alert('Participação confirmada! Boa sorte.');
 }
 
 function renderAdmin(){
@@ -452,6 +480,10 @@ async function excluirSorteio(id){
   for(const item of partSnap.docs) await deleteDoc(doc(firestore, `participantes_${cfg.tipo}`, item.id));
   const ganhSnap = await getDocs(query(col('ganhadores'), where('sorteioId','==',id)));
   for(const item of ganhSnap.docs) await deleteDoc(doc(firestore, `ganhadores_${cfg.tipo}`, item.id));
+  const resSnap = await getDocs(query(collection(firestore, `reservas_${cfg.tipo}`), where('sorteioId','==',id)));
+  for(const item of resSnap.docs) await deleteDoc(doc(firestore, `reservas_${cfg.tipo}`, item.id));
+  const whatsSnap = await getDocs(query(collection(firestore, `whats_${cfg.tipo}`), where('sorteioId','==',id)));
+  for(const item of whatsSnap.docs) await deleteDoc(doc(firestore, `whats_${cfg.tipo}`, item.id));
 }
 
 async function sortearGanhador(){
@@ -494,6 +526,10 @@ async function limparTudo(){
   for(const s of sorteios) await deleteDoc(doc(firestore, `sorteios_${cfg.tipo}`, s.id));
   for(const p of participantes) await deleteDoc(doc(firestore, `participantes_${cfg.tipo}`, p.id));
   for(const g of ganhadores) await deleteDoc(doc(firestore, `ganhadores_${cfg.tipo}`, g.id));
+  const resSnap = await getDocs(collection(firestore, `reservas_${cfg.tipo}`));
+  for(const item of resSnap.docs) await deleteDoc(doc(firestore, `reservas_${cfg.tipo}`, item.id));
+  const whatsSnap = await getDocs(collection(firestore, `whats_${cfg.tipo}`));
+  for(const item of whatsSnap.docs) await deleteDoc(doc(firestore, `whats_${cfg.tipo}`, item.id));
 }
 
 function bindEvents(){
